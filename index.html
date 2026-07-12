@@ -541,19 +541,328 @@
   -->
 
   <script>
-    const IMAGES = {
-      HERO_DUO: "IMG_0001.JPG",
-      REAR_DUO: "IMG_0002.JPG",
-      LIGHT_FRONT: "IMG_0003.JPG",
-      DARK_FRONT: "IMG_0004.JPG",
-      LIGHT_HEAD: "IMG_0005.JPG",
-      DARK_HEAD: "IMG_0006.JPG",
-      LIGHT_ANGLE: "IMG_0007.JPG",
-      DARK_ANGLE: "IMG_0008.JPG",
-      CONTROLS: "IMG_0009.JPG",
-      REAR_ANGLE: "IMG_0010.JPG"
-    };
-  </script>
+  (() => {
+    const SLOT_ORDER = [
+      "HERO_DUO",
+      "REAR_DUO",
+      "LIGHT_FRONT",
+      "DARK_FRONT",
+      "LIGHT_HEAD",
+      "DARK_HEAD",
+      "LIGHT_ANGLE",
+      "DARK_ANGLE",
+      "CONTROLS",
+      "REAR_ANGLE"
+    ];
+
+    const IMAGE_FILENAME_PATTERN =
+      /^IMG[_-]?\d+\.(jpg|jpeg|png|webp)$/i;
+
+    function extractImageNumber(filename) {
+      const match = filename.match(/IMG[_-]?(\d+)/i);
+      return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+    }
+
+    function getGitHubContext() {
+      /*
+        Supports preview links such as:
+
+        https://htmlpreview.github.io/?https://github.com/OWNER/REPOSITORY/blob/main/index.html
+      */
+
+      const previewTarget = decodeURIComponent(
+        window.location.search.slice(1)
+      );
+
+      if (/^https?:\/\/github\.com\//i.test(previewTarget)) {
+        const targetURL = new URL(previewTarget);
+        const parts = targetURL.pathname
+          .split("/")
+          .filter(Boolean);
+
+        const owner = parts[0];
+        const repository = parts[1];
+        const routeType = parts[2];
+        const branch = parts[3];
+        const fileParts = parts.slice(4);
+
+        if (
+          owner &&
+          repository &&
+          branch &&
+          (routeType === "blob" || routeType === "raw")
+        ) {
+          fileParts.pop();
+
+          return {
+            owner,
+            repository,
+            branch,
+            directory: fileParts.join("/")
+          };
+        }
+      }
+
+      /*
+        Supports GitHub Pages links such as:
+
+        https://OWNER.github.io/REPOSITORY/
+        https://OWNER.github.io/REPOSITORY/folder/
+      */
+
+      if (window.location.hostname.endsWith(".github.io")) {
+        const owner = window.location.hostname.split(".")[0];
+
+        const pathParts = window.location.pathname
+          .split("/")
+          .filter(Boolean);
+
+        let repository;
+        let directoryParts;
+
+        if (
+          pathParts.length > 0 &&
+          !/^index\.html?$/i.test(pathParts[0])
+        ) {
+          repository = pathParts.shift();
+          directoryParts = pathParts;
+        } else {
+          repository = `${owner}.github.io`;
+          directoryParts = pathParts;
+        }
+
+        const finalPart =
+          directoryParts[directoryParts.length - 1];
+
+        if (
+          finalPart &&
+          /\.(html?|php)$/i.test(finalPart)
+        ) {
+          directoryParts.pop();
+        }
+
+        return {
+          owner,
+          repository,
+          branch: null,
+          directory: directoryParts.join("/")
+        };
+      }
+
+      return null;
+    }
+
+    async function requestDirectory(
+      context,
+      directory,
+      branch
+    ) {
+      const encodedDirectory = directory
+        .split("/")
+        .filter(Boolean)
+        .map(encodeURIComponent)
+        .join("/");
+
+      let apiURL =
+        `https://api.github.com/repos/` +
+        `${encodeURIComponent(context.owner)}/` +
+        `${encodeURIComponent(context.repository)}/contents`;
+
+      if (encodedDirectory) {
+        apiURL += `/${encodedDirectory}`;
+      }
+
+      if (branch) {
+        apiURL += `?ref=${encodeURIComponent(branch)}`;
+      }
+
+      const response = await fetch(apiURL, {
+        headers: {
+          Accept: "application/vnd.github+json"
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          `GitHub returned ${response.status} for ${apiURL}`
+        );
+      }
+
+      const result = await response.json();
+
+      if (!Array.isArray(result)) {
+        throw new Error(
+          `The GitHub path is not a directory: ${apiURL}`
+        );
+      }
+
+      return result;
+    }
+
+    async function findRepositoryImages(context) {
+      const directories = [
+        context.directory,
+        [context.directory, "images"]
+          .filter(Boolean)
+          .join("/")
+      ];
+
+      const branches = [
+        context.branch,
+        null,
+        "main",
+        "master",
+        "gh-pages"
+      ];
+
+      const uniqueDirectories = [
+        ...new Set(directories)
+      ];
+
+      const uniqueBranches = [
+        ...new Set(branches)
+      ];
+
+      const discoveredImages = new Map();
+
+      for (const directory of uniqueDirectories) {
+        for (const branch of uniqueBranches) {
+          try {
+            const files = await requestDirectory(
+              context,
+              directory,
+              branch
+            );
+
+            files.forEach((file) => {
+              if (
+                file.type === "file" &&
+                IMAGE_FILENAME_PATTERN.test(file.name) &&
+                file.download_url
+              ) {
+                discoveredImages.set(
+                  file.download_url,
+                  {
+                    name: file.name,
+                    url: file.download_url
+                  }
+                );
+              }
+            });
+
+            if (discoveredImages.size >= SLOT_ORDER.length) {
+              break;
+            }
+          } catch (error) {
+            console.debug(error.message);
+          }
+        }
+
+        if (discoveredImages.size >= SLOT_ORDER.length) {
+          break;
+        }
+      }
+
+      return [...discoveredImages.values()].sort(
+        (firstImage, secondImage) => {
+          return (
+            extractImageNumber(firstImage.name) -
+            extractImageNumber(secondImage.name)
+          );
+        }
+      );
+    }
+
+    function insertImages(images) {
+      SLOT_ORDER.forEach((slotName, index) => {
+        const imageElement = document.querySelector(
+          `[data-img="${slotName}"]`
+        );
+
+        const imageFile = images[index];
+
+        if (!imageElement) {
+          console.warn(
+            `No HTML image element exists for ${slotName}.`
+          );
+          return;
+        }
+
+        if (!imageFile) {
+          imageElement.alt =
+            `Missing image for ${slotName}`;
+          console.error(
+            `No IMG file was found for ${slotName}.`
+          );
+          return;
+        }
+
+        imageElement.src = imageFile.url;
+        imageElement.dataset.filename =
+          imageFile.name;
+
+        imageElement.addEventListener(
+          "error",
+          () => {
+            console.error(
+              `The browser could not load ${imageFile.name}.`
+            );
+          },
+          {
+            once: true
+          }
+        );
+      });
+    }
+
+    async function loadProductImages() {
+      const context = getGitHubContext();
+
+      if (!context) {
+        console.error(
+          "This automatic image loader requires " +
+          "GitHub Pages or an htmlpreview.github.io URL."
+        );
+        return;
+      }
+
+      try {
+        const images =
+          await findRepositoryImages(context);
+
+        if (images.length === 0) {
+          throw new Error(
+            "No files beginning with IMG_ were found " +
+            "beside index.html or inside an images folder."
+          );
+        }
+
+        if (images.length < SLOT_ORDER.length) {
+          console.warn(
+            `Only ${images.length} IMG files were found. ` +
+            `${SLOT_ORDER.length} are required.`
+          );
+        }
+
+        insertImages(images);
+      } catch (error) {
+        console.error(
+          "The product images could not be loaded:",
+          error
+        );
+      }
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener(
+        "DOMContentLoaded",
+        loadProductImages
+      );
+    } else {
+      loadProductImages();
+    }
+  })();
+</script>
 
   <header class="site-header">
     <div class="header-inner">
